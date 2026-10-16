@@ -1,0 +1,74 @@
+regions:
+  hormuz:
+    name: "Strait of Hormuz / Persian Gulf"
+    multiplier: 1.25
+    bbox: [24.0, 30.5, 48.0, 58.5]      # lat_min, lat_max, lon_min, lon_max
+    why: "Direct crude shock risk"
+  red_sea:
+    name: "Red Sea / Gulf of Aden"
+    multiplier: 1.10
+    bbox: [11.0, 30.0, 32.0, 45.5]
+    why: "Shipping, freight and crude route risk"
+  india_pak:
+    name: "India-Pakistan Border"
+    multiplier: 1.30
+    bbox: [22.0, 37.5, 66.0, 78.0]
+    why: "Direct India market gap risk"
+
+weights:
+  gps_jamming_cluster: 25
+  military_spike: 20
+  tanker_dark_gap: 20
+  conflict_news_spike: 15
+  crude_confirmation: 10
+  vix_confirmation: 10
+
+risk_bands:
+  normal: [0, 30]
+  caution: [31, 55]
+  high: [56, 75]
+  avoid: [76, 100]
+
+rules:
+  lookback_minutes: 120
+  news_lookback_minutes: 240
+  gps:
+    min_events: 5          # distinct aircraft with degraded GPS in 60 min
+    min_avg_severity: 0.65
+    min_events_for_severity_rule: 3   # noise guard: severity rule needs at least 3 aircraft
+    degraded_nacp_max: 5   # NACp <= 5 means position error >= 0.3 NM
+  military:
+    min_aircraft: 8
+  ais:
+    min_anomalies: 3       # in 2 hours
+    gap_minutes: 90
+    stationary_minutes: 60
+  news:
+    min_mentions: 5
+  crude:
+    thresholds: [1.5, 2.5, 4.0]
+  vix:
+    thresholds: [3.0, 7.0, 12.0]
+  market_max_age_minutes: 45   # older bars are stale (market closed) and give no signal
+
+alerts:
+  dedupe_minutes: 60
+  telegram_enabled: true
+  morning_summary_time_ist: "08:45"
+  resolve_after_checks: 3
+
+retention_days: 14
+
+# chokepoints watched for tanker anomalies (lat_min, lat_max, lon_min, lon_max)
+chokepoints:
+  hormuz:
+    - {name: "Strait of Hormuz", bbox: [25.6, 27.2, 55.2, 57.4]}
+  red_sea:
+    - {name: "Bab-el-Mandeb", bbox: [11.8, 13.8, 42.3, 44.2]}
+    - {name: "Gulf of Suez approach", bbox: [27.4, 30.0, 32.2, 34.0]}
+
+# Strike Guard: how far outside the VIX-implied weekly move to place short strikes, by risk band
+strike_guard:
+  sigma_multiple: {NORMAL: 1.0, CAUTION: 1.3, HIGH: 1.7, AVOID: 2.2}
+  strike_step: 50
+  wing_width: 100
