@@ -1,0 +1,19 @@
+# Render Blueprint: one web service (API + scheduler + dashboard). Database: external free Neon Postgres via DATABASE_URL.
+services:
+  - type: web
+    name: geomacro
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: DATABASE_URL        # paste your Neon Postgres connection string
+        sync: false
+      - key: ADMIN_PASSWORD      # login password for the dashboard and Settings
+        sync: false
+      - key: LLM_PROVIDER
+        value: none
+      # Optional, add later in the Render Environment tab: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, AISSTREAM_API_KEY
