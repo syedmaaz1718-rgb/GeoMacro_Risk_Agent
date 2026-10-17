@@ -139,13 +139,16 @@ def collect_ais_anomalies():
 
 async def listen_forever():
     """Persistent websocket listener; flushes vessel updates in small batches."""
+    import random
+    import time
     import websockets
-    key = env("AISSTREAM_API_KEY")
     boxes = [[[b[0], b[2]], [b[1], b[3]]] for _, _, b in zones()]
-    sub = {"APIKey": key, "BoundingBoxes": boxes,
-           "FilterMessageTypes": ["PositionReport", "ShipStaticData"]}
     backoff = 5
     while True:
+        started = time.time()
+        key = env("AISSTREAM_API_KEY")          # re-read so a changed key is picked up
+        sub = {"APIKey": key, "BoundingBoxes": boxes,
+               "FilterMessageTypes": ["PositionReport", "ShipStaticData"]}
         try:
             async with websockets.connect(WS, ping_interval=20, max_size=2**20) as ws:
                 await ws.send(json.dumps(sub))
@@ -170,8 +173,18 @@ async def listen_forever():
         except Exception as e:  # noqa: BLE001
             STATE.update(connected=False, error=f"{type(e).__name__}: {e}"[:200])
             log.warning("aisstream listener error: %s", STATE["error"])
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 120)
+            if time.time() - started > 300:
+                backoff = 5                      # was healthy for a while, restart small
+            if "429" in str(e):
+                # Rate limited: hammering keeps the block alive. Stay quiet for a long time.
+                backoff = max(backoff, 900)      # 15 min first, then doubling up to 2 h
+                wait = backoff + random.uniform(0, 60)
+                backoff = min(backoff * 2, 7200)
+            else:
+                wait = backoff + random.uniform(0, 3)
+                backoff = min(backoff * 2, 300)
+            STATE["error"] += f" (retry in {int(wait)}s)"
+            await asyncio.sleep(wait)
 
 
 def _flush(msgs):
