@@ -1,9 +1,14 @@
-"""Crude (Brent, WTI fallback) and India VIX from Yahoo Finance chart API; VIX falls back to NSE."""
+"""Crude (Brent, WTI fallback) and India VIX from Yahoo Finance chart API; VIX falls back to NSE.
+
+Yahoo rate-limits some shared hosting IPs (HTTP 429). When every live source fails, the last
+real response stored by `market_fallback` is emitted instead, marked `cached` with its real
+fetch time. Stale values never raise the risk score: the extractors ignore stale market events."""
 from datetime import datetime, timezone
 
 import httpx
 
 from ..config import cfg
+from ..market_fallback import load_quote, save_quote
 from . import UA, make_event
 
 YF = "https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=5m&range=1d"
@@ -37,7 +42,7 @@ def nse_vix(client):
     raise ValueError("INDIA VIX not found")
 
 
-def _event(kind, d, thresholds):
+def _event(kind, d, thresholds, cached_as_of=None):
     ts = datetime.now(timezone.utc)
     age = (ts - d["bar_time"]).total_seconds() / 60
     stale = age > cfg()["rules"]["market_max_age_minutes"]
@@ -46,30 +51,39 @@ def _event(kind, d, thresholds):
     meta = {"pct": round(d["pct"], 3), "last": d["last"], "prev_close": d["prev_close"],
             "symbol": d["symbol"], "bar_time": d["bar_time"].isoformat(), "age_minutes": round(age, 1),
             "stale": stale, "feed_name": "yahoo_chart", "confidence": 0.9}
+    if cached_as_of is not None:
+        meta["cached"] = True
+        meta["cached_as_of"] = cached_as_of.isoformat()
     return make_event("market_feed", kind, "global", ts, None, None, sev, dict(meta, bar_time=meta["bar_time"]), meta)
+
+
+def _live_or_cached(client, live_fns, cache_symbols, errors):
+    """Try each live source; on success refresh the stored last-good quote and return it live.
+    When every live source fails, fall back to the newest stored real quote."""
+    for fn, sym in live_fns:
+        try:
+            d = fn()
+            save_quote(sym, d)
+            return d, None
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{sym}: {e}")
+    for sym in cache_symbols:
+        c = load_quote(sym)
+        if c:
+            return c["quote"], c["fetched_at"]
+    return None, None
 
 
 def collect_market():
     out, errors = [], []
     with httpx.Client(timeout=20, headers={"User-Agent": UA}, follow_redirects=True) as c:
-        d = None
-        for sym in ("BZ=F", "CL=F"):
-            try:
-                d = yahoo_move(c, sym)
-                break
-            except Exception as e:  # noqa: BLE001
-                errors.append(f"{sym}: {e}")
+        d, cached = _live_or_cached(c, [(lambda: yahoo_move(c, s), s) for s in ("BZ=F", "CL=F")], ("BZ=F", "CL=F"), errors)
         if d:
-            out.append(_event("crude_move", d, cfg()["rules"]["crude"]["thresholds"]))
-        d = None
-        for fn in (lambda: yahoo_move(c, "^INDIAVIX"), lambda: nse_vix(c)):
-            try:
-                d = fn()
-                break
-            except Exception as e:  # noqa: BLE001
-                errors.append(f"vix: {e}")
+            out.append(_event("crude_move", d, cfg()["rules"]["crude"]["thresholds"], cached))
+        d, cached = _live_or_cached(c, [(lambda: yahoo_move(c, "^INDIAVIX"), "^INDIAVIX"), (lambda: nse_vix(c), "NSE:INDIA VIX")],
+                                    ("^INDIAVIX", "NSE:INDIA VIX"), errors)
         if d:
-            out.append(_event("vix_move", d, cfg()["rules"]["vix"]["thresholds"]))
+            out.append(_event("vix_move", d, cfg()["rules"]["vix"]["thresholds"], cached))
     if not out:
-        raise RuntimeError("; ".join(errors))
+        raise RuntimeError("; ".join(errors) or "no live or cached market data")
     return out

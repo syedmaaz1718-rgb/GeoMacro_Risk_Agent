@@ -99,7 +99,7 @@ def test_backtest_math(monkeypatch):
         p = 100 + i
         n[ts] = (p, p + 1, p - 1)
         v[ts] = (15.0, 15.0, 15.0)
-    monkeypatch.setattr(ax, "_history", lambda: {"n": n, "v": v})
+    monkeypatch.setattr(ax, "_history", lambda: {"data": {"n": n, "v": v}, "live": True, "as_of": None})
     d = c.get("/api/backtest?hold_days=5").json()
     assert d["windows"] >= 10 and d["all"][0]["n"] == d["windows"]
     assert d["all"][0]["touch_pct"] >= d["all"][0]["close_pct"]

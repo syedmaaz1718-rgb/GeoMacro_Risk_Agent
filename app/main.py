@@ -260,8 +260,14 @@ def feeds_status(s):
                     "error": last.detail if last and not last.ok else "",
                     "success_rate_24h": round(sum(1 for r in recent if r.ok) / len(recent) * 100) if recent else None})
     if ais.enabled():
-        out.append({"feed": "ais_stream", "ok": ais.STATE["connected"], "messages": ais.STATE["messages"],
-                    "last_message": ais.STATE["last_message"], "error": ais.STATE["error"]})
+        st = ais.STATE
+        note = st["error"]
+        if st.get("blocked") and not st["connected"]:
+            retry = f"; next retry at {st['next_retry_at']}" if st.get("next_retry_at") else ""
+            note = f"aisstream is rate-limiting this server's IP (HTTP 429). Backing off quietly{retry}. New API key may help; if not, the host's IP range is blocked."
+        out.append({"feed": "ais_stream", "ok": st["connected"], "messages": st["messages"],
+                    "last_message": st["last_message"], "error": note, "blocked": st.get("blocked", False),
+                    "next_retry_at": st.get("next_retry_at")})
     return out
 
 

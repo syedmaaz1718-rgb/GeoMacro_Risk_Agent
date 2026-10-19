@@ -146,6 +146,18 @@ class FeedRun(Base):
     __table_args__ = (Index("idx_feed_runs_feed_time", "feed", "started_at"),)
 
 
+class MarketCache(Base):
+    """Last good market-data payload per key (Yahoo quotes / history).
+
+    Yahoo rate-limits some shared hosting IPs. The last successful real response is
+    stored here and served, labelled with its real fetch time, when live fetches fail.
+    Nothing synthetic is ever stored: only data Yahoo actually returned."""
+    __tablename__ = "market_cache"
+    key: Mapped[str] = mapped_column(String(40), primary_key=True)
+    payload: Mapped[dict] = mapped_column(JSONType)
+    fetched_at: Mapped[datetime] = mapped_column(UTCDateTime, default=now)
+
+
 class Vessel(Base):
     """Latest AIS state per vessel (fed by the aisstream listener)."""
     __tablename__ = "vessels"

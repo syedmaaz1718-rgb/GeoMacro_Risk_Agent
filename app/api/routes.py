@@ -161,21 +161,35 @@ import httpx  # noqa: E402
 
 from ..collectors import UA  # noqa: E402
 from ..collectors.market_collector import yahoo_move  # noqa: E402
+from ..market_fallback import load, load_quote, save, save_quote  # noqa: E402
 from ..config import LABEL_RANK  # noqa: E402
 
 _sg: dict = {"t": 0, "d": None}
 
 
 def _quotes():
+    """Live NIFTY + India VIX quotes. On Yahoo failure, the last real stored quotes are
+    returned with live=False and as_of set, so Strike Guard degrades honestly."""
     if _sg["d"] and _time.time() - _sg["t"] < 60:
         return _sg["d"]
     with httpx.Client(timeout=15, headers={"User-Agent": UA}, follow_redirects=True) as c:
-        out = {}
+        out = {"live": True, "as_of": None}
         for k, sym in (("nifty", "^NSEI"), ("vix", "^INDIAVIX")):
             try:
-                out[k] = yahoo_move(c, sym)
+                d = yahoo_move(c, sym)
+                save_quote(sym, d)
+                out[k] = d
             except Exception as e:  # noqa: BLE001
                 out[k] = {"error": str(e)[:100]}
+    if "error" in out["nifty"] or "error" in out["vix"]:
+        cached, as_of = {}, []
+        for k, sym in (("nifty", "^NSEI"), ("vix", "^INDIAVIX")):
+            c = load_quote(sym)
+            if c:
+                cached[k] = c["quote"]
+                as_of.append(c["fetched_at"])
+        if len(cached) == 2:
+            out = {"live": False, "as_of": min(as_of).isoformat(), **cached}
     _sg.update(t=_time.time(), d=out)
     return out
 
@@ -202,7 +216,8 @@ def strikeguard(dte: int = Query(7, ge=1, le=45)):
     k = c["sigma_multiple"][label]
     base, adj = build(c["sigma_multiple"]["NORMAL"]), build(k)
     age = (now() - q["nifty"]["bar_time"]).total_seconds() / 60
-    return {"spot": spot, "spot_time": iso(q["nifty"]["bar_time"]), "spot_age_min": round(age),
+    return {"quotes_live": q.get("live", True), "quotes_as_of": q.get("as_of"),
+            "spot": spot, "spot_time": iso(q["nifty"]["bar_time"]), "spot_age_min": round(age),
             "vix": vix, "vix_time": iso(q["vix"]["bar_time"]), "dte": dte, "sigma_pts": round(sigma, 1), "sigma_pct": round(sigma / spot * 100, 2),
             "band": label, "score": top.score if top else 0, "region": top.region if top else None,
             "region_name": regions()[top.region]["name"] if top else None, "baseline": base, "adjusted": adj,
@@ -291,19 +306,36 @@ def scenario(body: ScenarioIn):
 _bt: dict = {"t": 0, "d": None}
 
 
+def _pack_hist(h):
+    return {k: [[t] + list(v) for t, v in sorted(vv.items())] for k, vv in h.items()}
+
+
+def _unpack_hist(p):
+    return {k: {int(r[0]): (r[1], r[2], r[3]) for r in rows} for k, rows in p.items()}
+
+
 def _history():
+    """5y daily NIFTY + VIX. Live when Yahoo answers, otherwise the last real stored history."""
     if _bt["d"] and _time.time() - _bt["t"] < 6 * 3600:
         return _bt["d"]
-    out = {}
-    with httpx.Client(timeout=25, headers={"User-Agent": UA}, follow_redirects=True) as c:
-        for k, sym in (("n", "^NSEI"), ("v", "^INDIAVIX")):
-            res = c.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=5y")
-            res.raise_for_status()
-            j = res.json()["chart"]["result"][0]
-            q = j["indicators"]["quote"][0]
-            out[k] = {t: (q["close"][i], q["high"][i], q["low"][i]) for i, t in enumerate(j["timestamp"]) if q["close"][i] is not None}
-    _bt.update(t=_time.time(), d=out)
-    return out
+    try:
+        out = {}
+        with httpx.Client(timeout=25, headers={"User-Agent": UA}, follow_redirects=True) as c:
+            for k, sym in (("n", "^NSEI"), ("v", "^INDIAVIX")):
+                res = c.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=5y")
+                res.raise_for_status()
+                j = res.json()["chart"]["result"][0]
+                q = j["indicators"]["quote"][0]
+                out[k] = {t: (q["close"][i], q["high"][i], q["low"][i]) for i, t in enumerate(j["timestamp"]) if q["close"][i] is not None}
+        save("hist5y", _pack_hist(out))
+        result = {"data": out, "live": True, "as_of": None}
+    except Exception:  # noqa: BLE001
+        cached = load("hist5y")
+        if not cached:
+            raise
+        result = {"data": _unpack_hist(cached["payload"]), "live": False, "as_of": cached["fetched_at"].isoformat()}
+    _bt.update(t=_time.time(), d=result)
+    return result
 
 
 def _day(ts):
@@ -317,8 +349,8 @@ def backtest(hold_days: int = Query(5, ge=1, le=10)):
         h = _history()
     except Exception as e:  # noqa: BLE001
         raise HTTPException(503, "Historical data is unavailable right now: " + str(e)[:80])
-    nd = {_day(t): v for t, v in h["n"].items()}
-    vd = {_day(t): v[0] for t, v in h["v"].items()}
+    nd = {_day(t): v for t, v in h["data"]["n"].items()}
+    vd = {_day(t): v[0] for t, v in h["data"]["v"].items()}
     days = sorted(d for d in nd if d in vd)
     mults = list(cfg()["strike_guard"]["sigma_multiple"].values())
     rows = []
@@ -343,6 +375,7 @@ def backtest(hold_days: int = Query(5, ge=1, le=10)):
     hi_rows = [x for x in rows if x["vix"] >= hi]
     worst = sorted(rows, key=lambda x: -max(abs(x["close"]) / x["sigma"], 0))[:8]
     return {"hold_days": hold_days, "windows": len(rows), "from": rows[0]["d"], "to": rows[-1]["end"], "source": "Yahoo Finance daily ^NSEI and ^INDIAVIX",
+            "data_live": h["live"], "data_as_of": h["as_of"],
             "all": [stats(rows, k) for k in mults], "high_vix": {"threshold": round(hi, 1), "n": len(hi_rows), "stats": [stats(hi_rows, k) for k in mults]},
             "worst": [{"start": x["d"], "end": x["end"], "vix": x["vix"], "move_pct": round(x["close"] * 100, 2), "sigma_pct": round(x["sigma"] * 100, 2), "multiple": round(abs(x["close"]) / x["sigma"], 2)} for x in worst]}
 
@@ -352,18 +385,27 @@ _gp: dict = {"t": 0, "d": None}
 
 
 def _gap_history():
+    """5y daily opens/closes. Live when Yahoo answers, otherwise the last real stored history."""
     if _gp["d"] and _time.time() - _gp["t"] < 6 * 3600:
         return _gp["d"]
-    with httpx.Client(timeout=25, headers={"User-Agent": UA}, follow_redirects=True) as c:
-        out = {}
-        for k, sym in (("n", "^NSEI"), ("v", "^INDIAVIX")):
-            res = c.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=5y")
-            res.raise_for_status()
-            j = res.json()["chart"]["result"][0]
-            q = j["indicators"]["quote"][0]
-            out[k] = [(t, q["open"][i], q["close"][i]) for i, t in enumerate(j["timestamp"]) if q["open"][i] and q["close"][i]]
-    _gp.update(t=_time.time(), d=out)
-    return out
+    try:
+        with httpx.Client(timeout=25, headers={"User-Agent": UA}, follow_redirects=True) as c:
+            out = {}
+            for k, sym in (("n", "^NSEI"), ("v", "^INDIAVIX")):
+                res = c.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=5y")
+                res.raise_for_status()
+                j = res.json()["chart"]["result"][0]
+                q = j["indicators"]["quote"][0]
+                out[k] = [(t, q["open"][i], q["close"][i]) for i, t in enumerate(j["timestamp"]) if q["open"][i] and q["close"][i]]
+        save("gaphist5y", out)
+        result = {"data": out, "live": True, "as_of": None}
+    except Exception:  # noqa: BLE001
+        cached = load("gaphist5y")
+        if not cached:
+            raise
+        result = {"data": cached["payload"], "live": False, "as_of": cached["fetched_at"].isoformat()}
+    _gp.update(t=_time.time(), d=result)
+    return result
 
 
 def compute_gaps(nifty, vix):
@@ -413,10 +455,12 @@ def gaps():
         h = _gap_history()
     except Exception as e:  # noqa: BLE001
         raise HTTPException(503, "Historical data is unavailable right now: " + str(e)[:80])
-    out = compute_gaps(h["n"], h["v"])
+    out = compute_gaps(h["data"]["n"], h["data"]["v"])
     if not out:
         raise HTTPException(503, "Not enough history")
     out["source"] = "Yahoo Finance daily ^NSEI and ^INDIAVIX (open vs previous close)"
+    out["data_live"] = h["live"]
+    out["data_as_of"] = h["as_of"]
     return out
 
 

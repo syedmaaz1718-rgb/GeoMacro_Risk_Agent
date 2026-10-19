@@ -20,7 +20,7 @@ from . import make_event
 
 log = logging.getLogger("geomacro.ais")
 WS = "wss://stream.aisstream.io/v0/stream"
-STATE = {"connected": False, "messages": 0, "last_message": None, "error": ""}
+STATE = {"connected": False, "messages": 0, "last_message": None, "error": "", "blocked": False, "next_retry_at": None}
 
 
 def enabled():
@@ -152,7 +152,7 @@ async def listen_forever():
         try:
             async with websockets.connect(WS, ping_interval=20, max_size=2**20) as ws:
                 await ws.send(json.dumps(sub))
-                STATE.update(connected=True, error="")
+                STATE.update(connected=True, error="", blocked=False, next_retry_at=None)
                 backoff = 5
                 buf, last_flush = [], datetime.now(timezone.utc)
                 while True:
@@ -180,10 +180,12 @@ async def listen_forever():
                 backoff = max(backoff, 900)      # 15 min first, then doubling up to 2 h
                 wait = backoff + random.uniform(0, 60)
                 backoff = min(backoff * 2, 7200)
+                STATE["blocked"] = True
             else:
                 wait = backoff + random.uniform(0, 3)
                 backoff = min(backoff * 2, 300)
-            STATE["error"] += f" (retry in {int(wait)}s)"
+                STATE["blocked"] = False
+            STATE["next_retry_at"] = (datetime.now(timezone.utc) + timedelta(seconds=wait)).isoformat()
             await asyncio.sleep(wait)
 
 

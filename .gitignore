@@ -1,2 +1,5 @@
-# Created by pytest automatically.
-*
+__pycache__/
+*.pyc
+geomacro.db
+.env
+.pytest_cache/
